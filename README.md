@@ -1,58 +1,48 @@
 
 
 
-## Overview
+## Emby Sync — Setup and Usage
 
-Tools to sync Emby favorites and optionally notify via Telegram. Run locally (Windows) or on a Synology NAS.
+This project builds a Docker image that syncs Emby favorites and can notify via Telegram. Use the Windows commands below (PowerShell) or adapt for Synology.
 
-## Build the Docker image (Windows PowerShell)
+### 1) Build the Docker image (Windows)
 
 ```powershell
-docker build -t emby-sync:latest -f app\Dockerfile app
+docker build -t emby-sync:latest -f app/Dockerfile app
 ```
 
-Optionally export the image to a tar (for upload to Synology):
+Optionally export the image to a tar file (useful for Synology import):
 
 ```powershell
-docker save -o emby-sync.tar emby-sync:latest
+docker save -o images/emby-sync.tar emby-sync:latest
 ```
 
-## Run with Docker Compose (Windows)
+### 2) Run with Docker Compose (Windows)
+
+Use the Windows compose file in this repo:
 
 ```powershell
-# If compose file is at repo root
-docker compose up -d --build
+docker compose -f .\docker-compose.windows.yml up -d
+```
 
-# Or specify a file
+To test/run the container once:
+
+```powershell
 docker compose -f .\docker-compose.windows.yml run --rm emby-sync
 ```
 
-## Run locally without Docker (quick test)
+### 3) Test Python locally (without Docker)
+
+From the `app` folder:
 
 ```powershell
-cd app
-python emby_favorites_sync.py --config ..\config\emby-sync.yml
+python .\emby_favorites_sync.py --config ..\config\emby-sync.yml
 ```
 
-## Synology NAS
+### 4) Telegram setup
 
-- Upload `emby-sync.tar` via Container Manager → Image → Upload.
-- Or create a Project and import `docker-compose.synology.yml` to deploy.
-- To run on a schedule (every 5 min), use Control Panel → Task Scheduler → User-defined script:
-
-It can also run it through a command line 
-```bash
-docker run --rm --name emby-sync \
-  -v /volume1/docker/emby-sync/config:/app/config:ro \
-  -v /volume1/docker/emby-sync/state:/app/state \
-  -v /volume2/emby-sync/:/downloads \
-  emby-sync:latest
-```
-
-## Telegram setup
-
-1. In Telegram, message `@BotFather` → `/newbot` → get the API token.
-2. Get your chat id in PowerShell:
+- Create a bot via Telegram: message `@BotFather`, send `/newbot`, and obtain the API token.
+- Get your chat ID using PowerShell:
 
 ```powershell
 $token = "YOUR_TOKEN"
@@ -60,28 +50,47 @@ $u = Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/getUpdates"
 $u.result | ForEach-Object { $_.message.chat.id }
 ```
 
-## Config file (`config/emby-sync.yml`)
+### 5) Configuration file
 
-```yml
+Create `config/emby-sync.yml` with your details:
+
+```yaml
 telegram:
   bot_token: "3245:adfad"
   chat_id: "23452"
 
 emby:
-  server: "http://yourserver:42402/"
+  server: "http://yourserver:8096/"  # Example Emby server URL
   api_key: ""
   user_id: ""
 
 sync:
-  dest_dir: "./downloads"          # inside container; mapped to NAS volume
+  dest_dir: "./downloads"          # inside container; map this to your NAS volume
   content: "tv"                    # movies | tv | both
   latest_season_only: true
   dry_run: true
 ```
 
-## Notes
+### 6) Synology: import and schedule
 
-- Ensure the compose service uses `image: emby-sync:latest` or a `build:` block.
-- On Synology via SSH, you may need `sudo` for Docker commands.
-- For Windows paths in volumes, prefer Compose files tailored to Windows (see `docker-compose.windows.yml`).
+1. Import the Docker image tar:
+   - Build and `docker save` the image on Windows (see step 1).
+   - Upload `images/emby-sync.tar` into Synology Container Manager and import.
+
+2. Use a Compose project:
+   - In Container Manager, create a project and upload your compose file (e.g., `docker-compose.synology.yml`).
+
+Schedule periodic runs via Task Scheduler:
+
+- Task Scheduler → Create → Scheduled Task → User-defined script
+- User: `root`
+- Schedule: Every 5 minutes
+- Script:
+
+```bash
+docker start --attach emby-sync
+```
+
+Note: Adjust container name and volume mappings to match your environment.
+
 

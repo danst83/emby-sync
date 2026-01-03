@@ -1,67 +1,77 @@
-#!/usr/bin/env python3
-import os, sys, json, traceback, yaml
-
-# Import your modules
-from notify import send_telegram
+import sys, traceback, os
+from notify import send_telegram, edit_telegram
 from emby_favorites_sync import main as sync_main
+from emby_favorites_sync import NullReporter
+import argparse
 
-CONFIG_PATH = os.environ.get("CONFIG_PATH", "/app/config/emby-sync.yml")
-#LOCKFILE    = os.environ.get("LOCKFILE", "/app/state/emby_sync.lock")
+class TelegramReporter(NullReporter):
+    def __init__(self):
+        self.message_ids: dict[str, int] = {}
+
+    def _key(self, item: dict) -> str:
+        return item.get("Id") or item.get("Name") or "unknown"
+
+    def _display_name(self, item: dict) -> str:
+        t = (item.get("Type") or "").lower()
+        if t == "episode":
+            series = item.get("SeriesName") or item.get("Series") or ""
+            # Season/Episode numbers if available
+            ss = item.get("ParentIndexNumber")
+            ee = item.get("IndexNumber")
+            season_str = f"Season {ss}" if ss is not None else (item.get("SeasonName") or "")
+            ep_name = item.get("Name") or ""
+            ep_num = f"E{ee:02d}" if isinstance(ee, int) else ""
+            sea_num = f"S{ss:02d}" if isinstance(ss, int) else ""
+            # Prefer SxxExx format when numbers exist
+            if sea_num or ep_num:
+                return esc(f"{series} {sea_num}{ep_num} - {ep_name}")
+            # Fallback to season name
+            if season_str:
+                return esc(f"{series} - {season_str} - {ep_name}")
+            return esc(f"{series} - {ep_name}")
+        # Movie or other
+        return esc(item.get("Name") or "Unknown")
+
+    def on_start_item(self, item, out_path):
+        name = self._display_name(item)
+        resp = send_telegram(f"Starting: {name}")
+        if resp and resp.get("ok") and resp.get("result"):
+            mid = resp["result"]["message_id"]
+            self.message_ids[self._key(item)] = mid
+
+    def on_progress(self, item, out_path, bytes_written, total_bytes):
+        mid = self.message_ids.get(self._key(item))
+        if not mid or not total_bytes:
+            return
+        pct = int(100 * bytes_written / total_bytes)
+        text = f"Downloading: {self._display_name(item)}\n{pct}% ({bytes_written/1024/1024:.1f} MB / {total_bytes/1024/1024:.1f} MB)"
+        edit_telegram(mid, text)
+
+    def on_done(self, item, out_path):
+        mid = self.message_ids.get(self._key(item))
+        text = f"Completed: {self._display_name(item)}"
+        if mid:
+            edit_telegram(mid, text)
+        else:
+            send_telegram(text)
+
+    def on_skip(self, item, reason):
+        mid = self.message_ids.get(self._key(item))
+        text = f"Skipped: {self._display_name(item)}"
+        if mid:
+            edit_telegram(mid, text)
+        else:
+            send_telegram(text)
+
+    def on_error(self, item, error):
+        send_telegram(f"Error: {self._display_name(item)}\n{esc(error)}")
 
 def esc(s: str) -> str:
     s = str(s)
     return s.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
 
-def load_yaml(path: str) -> dict:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except Exception as e:
-        raise RuntimeError(f"Failed to load YAML: {path} ({e})")
-
-def normalize_config(raw: dict) -> dict:
-    emby = raw.get("emby", {}) or {}
-    sync = raw.get("sync", {}) or {}
-
-    server = str(emby.get("server","")).strip()
-    api    = str(emby.get("api_key","")).strip()
-    user   = str(emby.get("user_id","")).strip()
-
-    # Prefer new keys ('content' or 'mode') over legacy 'only'
-    content_raw = sync.get("content", sync.get("mode", sync.get("only","both")))
-    content     = str(content_raw).strip().lower()
-
-    dest   = str(sync.get("dest_dir","/app/download")).strip()
-    latest = bool(sync.get("latest_season_only", False))
-    dryrun = bool(sync.get("dry_run", False))
-
-    if content not in ("movies","tv","both"):
-        raise ValueError(f"Invalid sync.content/mode/only: {content} (expected: movies|tv|both)")
-    for key, val in (("emby.server", server), ("emby.api_key", api), ("emby.user_id", user)):
-        if not val:
-            raise ValueError(f"Missing required config key: {key}")
-
-    return {
-        "server": server,
-        "api": api,
-        "user": user,
-        "dest": dest,
-        "content": content,
-        "latest": latest,
-        "dryrun": dryrun,
-    }
-
-def notify_start(cfg: dict):
-    send_telegram(
-        f"🚀 <b>Emby sync started</b>\n"
-        f"Server: <code>{esc(cfg['server'])}</code>\n"
-        f"UserId: <code>{esc(cfg['user'])}</code>\n"
-        f"Dest:   <code>{esc(cfg['dest'])}</code>\n"
-        f"Content: <code>{cfg['content']}</code> "
-        f"LatestSeasonOnly: <code>{cfg['latest']}</code> "
-        f"DryRun: <code>{cfg['dryrun']}</code>",
-        parse_mode="HTML",
-    )
+def notify_start():
+    send_telegram("🚀 <b>Emby sync started</b>\n")
 
 def notify_success():
     send_telegram("✅ <b>Emby sync finished successfully</b>")
@@ -69,41 +79,26 @@ def notify_success():
 def notify_failure(details: str):
     send_telegram(f"❌ <b>Emby sync failed</b>\n<pre>{esc(details)}</pre>", parse_mode="HTML")
 
-def main() -> int:
-    # # If entrypoint used a lock, runner can respect it too (optional check)
-    # if os.path.exists(LOCKFILE):
-    #     # entrypoint already exits on this; we keep runner simple and silent
-    #     return 0
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", dest="config_path", help="Path to YAML config file")
+    return p.parse_args()
 
-    # Load and normalize YAML config
-    raw = load_yaml(CONFIG_PATH)
-    cfg = normalize_config(raw)
-
-    # Announce start
-    notify_start(cfg)
-
-    # Build argv for the sync script
-    argv = [
-        "emby_favorites_sync.py",
-        "--server", cfg["server"],
-        "--api-key", cfg["api"],
-        "--user-id", cfg["user"],
-        "--dest", cfg["dest"],
-        "--content", cfg["content"],
-    ]
-    if cfg["latest"]: argv.append("--latest-season-only")
-    if cfg["dryrun"]: argv.append("--dry-run")
-
-    # Execute sync
+def main() -> int:    
     try:
-        sys.argv = argv
-        sync_main()
-        notify_success()
+        args = parse_args()
+        if args.config_path:
+            os.environ["CONFIG_PATH"] = args.config_path  # notify.py and sync read this
+        
+        #notify_start()
+        reporter = TelegramReporter()
+        sync_main(reporter=reporter)
+        #notify_success()
         return 0
     except SystemExit as se:
         code = int(getattr(se, 'code', 0) or 0)
         if code == 0:
-            notify_success()
+            #notify_success()
             return 0
         else:
             notify_failure(f"SystemExit with code {code}")

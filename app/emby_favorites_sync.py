@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 emby_favorites_sync.py
 
@@ -20,18 +19,16 @@ Auth
 """
 
 import argparse
+import json
 import os
 import re
-import sys
-import time
 import random
 import string
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import yaml 
 import requests
-
-import math
+from typing import Protocol, Any
 from contextlib import suppress
 
 # Try to use tqdm if available, otherwise fall back to a simple text progress
@@ -40,6 +37,21 @@ try:
     HAS_TQDM = True
 except Exception:
     HAS_TQDM = False
+
+class Reporter(Protocol):
+    def on_start_item(self, item: Dict, out_path: Path) -> None: ...
+    def on_progress(self, item: Dict, out_path: Path, bytes_written: int, total_bytes: Optional[int]) -> None: ...
+    def on_done(self, item: Dict, out_path: Path) -> None: ...
+    def on_skip(self, item: Dict, reason: str) -> None: ...
+    def on_error(self, item: Dict, error: Exception) -> None: ...
+
+# Provide a no-op default reporter
+class NullReporter:
+    def on_start_item(self, item: Dict, out_path: Path) -> None: pass
+    def on_progress(self, item: Dict, out_path: Path, bytes_written: int, total_bytes: Optional[int]) -> None: pass
+    def on_done(self, item: Dict, out_path: Path) -> None: pass
+    def on_skip(self, item: Dict, reason: str) -> None: pass
+    def on_error(self, item: Dict, error: Exception) -> None: pass
 
 
 # --------- Helpers ---------
@@ -139,7 +151,7 @@ class EmbyClient:
         }
         resp = self.get(f"/Items/{item_id}/PlaybackInfo", params=params)
         return resp.json()
-
+    
     # Direct stream download (static=true)
     def direct_stream(self, item_id: str, media_source_id: str, session_id: str) -> requests.Response:
         params = {
@@ -274,14 +286,27 @@ def collect_items_to_download(
     return list(dedup.values())
 
 
-def download_missing(client: EmbyClient, items: List[Dict], dest_root: Path, dry_run: bool = False) -> None:
+def download_missing(
+    client: EmbyClient,
+    items: List[Dict],
+    dest_root: Path,
+    dry_run: bool = False,
+    reporter: Optional[Reporter] = None
+) -> Dict[str, Any]:
+    reporter = reporter or NullReporter()
     skipped, downloaded = 0, 0
+    results_downloaded: list[str] = []
+    results_skipped: list[str] = []
+
     for it in items:
         item_type = it.get("Type")
         src, ext = resolve_best_source_and_ext(client, it)
         if not src:
-            print(f"[WARN] No media source for item {it.get('Name')} ({item_type}). Skipping.")
+            msg = f"No media source for {it.get('Name')} ({item_type})"
+            print(f"[WARN] {msg}. Skipping.")
+            results_skipped.append(msg)
             skipped += 1
+            #reporter.on_skip(it, msg)
             continue
 
         # Choose destination
@@ -291,49 +316,58 @@ def download_missing(client: EmbyClient, items: List[Dict], dest_root: Path, dry
             out_path = episode_dest(it, dest_root, ext)
 
         if out_path.exists():
-            print(f"[SKIP] Exists: {out_path}")
+            msg = f"Exists: {out_path}"
+            print(f"[SKIP] {msg}")
+            results_skipped.append(msg)
             skipped += 1
+            #reporter.on_skip(it, msg)
             continue
 
         if dry_run:
             print(f"[DRY] Would download: {it.get('Name')} -> {out_path}")
             downloaded += 1
+            results_downloaded.append(str(out_path))
+            #reporter.on_skip(it, "dry-run")
             continue
 
         # Stream download
         sess_id = play_session_id()
+        tmp_path = out_path.with_suffix(out_path.suffix + ".part")
         try:
             resp = client.direct_stream(item_id=it["Id"], media_source_id=src.get("Id", ""), session_id=sess_id)
 
-            tmp_path = out_path.with_suffix(out_path.suffix + ".part")
-            chunk_size = 1024 * 1024  # 1 MiB
-
-            # Try to get total size for a proper progress bar
+            # Try to get total size for progress
             total_bytes = None
             with suppress(Exception):
                 cl = resp.headers.get("Content-Length")
                 if cl is not None:
                     total_bytes = int(cl)
 
-            # Use tqdm if available and we have total size; otherwise fallback to text progress
+            reporter.on_start_item(it, out_path)
+
+            chunk_size = 32 * 1024 * 1024  # 64 MiB
+            written = 0
+
             if HAS_TQDM and total_bytes:
-                # tqdm-based progress bar
+                # tqdm progress bar
+                from tqdm import tqdm
                 with open(tmp_path, "wb") as f, tqdm(
                     total=total_bytes,
                     unit="B",
                     unit_scale=True,
                     unit_divisor=1024,
-                    desc=f"Downloading {out_path.name}",
+                    desc=f"{out_path.name}",
                     miniters=1,
                     leave=True,
                 ) as pbar:
                     for chunk in resp.iter_content(chunk_size=chunk_size):
                         if chunk:
                             f.write(chunk)
+                            written += len(chunk)
                             pbar.update(len(chunk))
+                            reporter.on_progress(it, out_path, written, total_bytes)
             else:
-                # Simple text progress (prints every ~5% if we know size, else every N MB)
-                written = 0
+                # Simple loop with periodic reporting
                 next_report = 0
                 with open(tmp_path, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=chunk_size):
@@ -343,30 +377,37 @@ def download_missing(client: EmbyClient, items: List[Dict], dest_root: Path, dry
                             if total_bytes:
                                 percent = int(100 * written / total_bytes)
                                 if percent >= next_report:
-                                    print(f"  ... {percent}% ({written/1024/1024:.1f} MB / {total_bytes/1024/1024:.1f} MB)")
-                                    next_report = min(percent + 5, 100)  # report every ~5%
+                                    print(f"  ... {percent}% ({written/1024/1024:.1f} MB / { (total_bytes or 1)/1024/1024:.1f} MB)")
+                                    reporter.on_progress(it, out_path, written, total_bytes)
+                                    next_report = min(percent + 5, 100)  # every ~5%
                             else:
                                 # Unknown total: report every 100 MB
                                 if (written // (100 * 1024 * 1024)) > next_report:
                                     next_report = written // (100 * 1024 * 1024)
                                     print(f"  ... {written/1024/1024:.1f} MB downloaded")
+                                    reporter.on_progress(it, out_path, written, total_bytes)
 
-            # Replace temp file atomically
+                            #reporter.on_progress(it, out_path, written, total_bytes)
+
             os.replace(tmp_path, out_path)
             print(f"[OK] Downloaded: {out_path}")
             downloaded += 1
+            results_downloaded.append(str(out_path))
+            reporter.on_done(it, out_path)
 
         except Exception as e:
             print(f"[ERR] Failed downloading {it.get('Name')}: {e}")
+            results_skipped.append(f"Fail {it.get('Name')}: {e}")
             skipped += 1
-            # cleanup partial
-            try:
+            reporter.on_error(it, e)
+            with suppress(Exception):
                 if tmp_path.exists():
                     tmp_path.unlink()
-            except Exception:
-                pass
 
+    summary = {"downloaded": downloaded, "skipped": skipped, "total": len(items),
+               "downloaded_paths": results_downloaded, "skipped_details": results_skipped}
     print(f"\nSummary: downloaded={downloaded}, skipped={skipped}, total={len(items)}")
+    return summary
 
 
 # ---------- YAML config loader ----------
@@ -386,7 +427,7 @@ def load_config(config_path: Optional[str]) -> Dict:
     """
 
     # Resolve config path:
-    cp = config_path or os.environ.get("CONFIG_PATH") or "emby-sync.yml"
+    cp = config_path or os.environ.get("CONFIG_PATH") or "./config/emby-sync.yml"
     cfg_file = Path(cp)
     if not cfg_file.exists():
         raise FileNotFoundError(f"Config file not found: {cfg_file}")
@@ -424,7 +465,7 @@ def load_config(config_path: Optional[str]) -> Dict:
         "dry_run": dry_run,
     }
 
-def main():
+def main(reporter: Optional[Reporter] = None):
     ap = argparse.ArgumentParser(description="Download Emby favorites to local storage (YAML-configured).")
     ap.add_argument("--config", help="Path to YAML config (overrides CONFIG_PATH/env).")
     # Optional CLI overrides (helpful for quick tests):
@@ -469,7 +510,12 @@ def main():
     )
 
     print(f"Found {len(items)} items to consider.")
-    download_missing(client, items, dest_root, dry_run=cfg["dry_run"])
+    summary = download_missing(client, items, dest_root, dry_run=cfg["dry_run"], reporter=reporter)
+    # Optional: write JSON summary to a state file for runner/entrypoint logging
+    with suppress(Exception):
+        state_dir = Path(os.environ.get("STATE_DIR", "/app/state"))
+        ensure_dir(state_dir)
+        (state_dir / "last_result.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":
