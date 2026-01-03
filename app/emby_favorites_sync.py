@@ -86,7 +86,7 @@ def guess_extension_from_source(source: Dict, fallback: str = "mkv") -> str:
 
 # --------- Emby API Client ---------
 class EmbyClient:
-    def __init__(self, base_url: str, api_key: str, user_id: str, timeout: int = 30):
+    def __init__(self, base_url: str, api_key: str, user_id: str, timeout: int = 60):
         # Accept both forms: with/without trailing '/emby'
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
