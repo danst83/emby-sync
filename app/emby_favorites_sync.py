@@ -345,7 +345,7 @@ def download_missing(
 
             reporter.on_start_item(it, out_path)
 
-            chunk_size = 32 * 1024 * 1024  # 64 MiB
+            chunk_size = 64 * 1024 * 1024  # 64 MiB
             written = 0
 
             if HAS_TQDM and total_bytes:
