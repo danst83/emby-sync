@@ -124,7 +124,7 @@ class EmbyClient:
             "IsFavorite": True,
             "UserId": self.user_id,
             # Extra fields to help naming
-            "Fields": "Path,ProductionYear,ParentId,IndexNumber,ParentIndexNumber,SeriesName,MediaSources"
+            "Fields": "Path,ProductionYear,ParentId,IndexNumber,ParentIndexNumber,SeriesName,MediaSources,SeriesId"
         }
 
         # Add filter only if non-empty
@@ -134,16 +134,37 @@ class EmbyClient:
         resp = self.get(f"/Users/{self.user_id}/Items", params=params)
         return resp.json().get("Items", [])
 
+    # Fetch basic series details to obtain original ProductionYear
+    def get_series(self, series_id: str) -> Dict:
+        fields = "ProductionYear,PremiereDate,SeriesName,Name"
+        # Prefer user-scoped query by Ids
+        with suppress(Exception):
+            params = {
+                "UserId": self.user_id,
+                "Fields": fields,
+                "Ids": series_id,
+                "IncludeItemTypes": "Series",
+            }
+            resp = self.get(f"/Users/{self.user_id}/Items", params=params)
+            items = resp.json().get("Items", [])
+            if items:
+                return items[0]
+
     # Episodes for a given Series
     def get_series_episodes(self, series_id: str) -> List[Dict]:
         # Prefer Shows/{Id}/Episodes for clarity; add fields for naming
         params = {
             "UserId": self.user_id,
-            "Fields": "Path,IndexNumber,ParentIndexNumber,SeriesName,ProductionYear"
+            "Fields": "Path,IndexNumber,ParentIndexNumber,SeriesName,ProductionYear,SeriesId"
         }
         resp = self.get(f"/Shows/{series_id}/Episodes", params=params)
         return resp.json().get("Items", [])
 
+    def get_item(self, item_id: str, fields: str = "SeriesId") -> Dict:
+        params = {"UserId": self.user_id, "Fields": fields}
+        resp = self.get(f"/Items/{item_id}", params=params)
+        return resp.json()
+    
     # PlaybackInfo to retrieve MediaSources (and the file Path)
     def get_playback_info(self, item_id: str) -> Dict:
         params = {
@@ -175,6 +196,27 @@ class EmbyClient:
         resp = self.get(f"/Shows/{series_id}/Seasons", params=params)
         return resp.json().get("Items", [])
 
+
+def get_series_year_for_item(client: EmbyClient, item: Dict) -> Optional[int]:
+    """
+    Get the production year for a series item.
+    """
+    series_id = item.get("SeriesId") or (item["Id"] if item.get("Type") == "Series" else None)
+    if not series_id:
+        return None
+
+    with suppress(Exception):
+        info = client.get_series(series_id)
+        year = info.get("ProductionYear")
+        if not year:
+            prem = info.get("PremiereDate") or ""
+            m = re.match(r"(\d{4})", str(prem))
+            if m:
+                year = int(m.group(1))
+        return year
+
+    return None
+
 # --------- Naming & Destination ---------
 def movie_dest(item: Dict, dest_root: Path, ext: str) -> Path:
     title = slugify_filename(item.get("Name", "Unknown"))
@@ -184,9 +226,9 @@ def movie_dest(item: Dict, dest_root: Path, ext: str) -> Path:
     ensure_dir(folder_path)
     return folder_path / f"{folder}.{ext}"
 
-def episode_dest(item: Dict, dest_root: Path, ext: str) -> Path:
+def episode_dest(item: Dict, dest_root: Path, ext: str, client: EmbyClient) -> Path:
     series = slugify_filename(item.get("SeriesName") or item.get("Name") or "Unknown Series")
-    year = item.get("ProductionYear")
+    year = get_series_year_for_item(client, item)    
     series_folder = f"{series} ({year})" if year else series
     season_num = item.get("ParentIndexNumber") or 0
     ep_num = item.get("IndexNumber") or 0
@@ -254,17 +296,12 @@ def collect_items_to_download(
 
                 # 3) Fetch episodes only for that season
                 eps = client.get_series_episodes(series_id=it["Id"])
-                # If the endpoint is heavy, prefer SeasonId param:
-                # eps = client.get(f"/Shows/{it['Id']}/Episodes", 
-                #                  params={"UserId": client.user_id, "SeasonId": latest["Id"]}).json().get("Items", [])
-                # The method overloading above would require a new client helper; for now filter:
                 season_id = latest.get("Id")
-                # Efficient path: call the endpoint with SeasonId. Since we did not add a dedicated method,
-                # let’s do it inline:
+                # Efficient path: call the endpoint with SeasonId
                 resp = client.get(f"/Shows/{it['Id']}/Episodes", params={
                     "UserId": client.user_id,
                     "SeasonId": season_id,
-                    "Fields": "Path,IndexNumber,ParentIndexNumber,SeriesName,ProductionYear"
+                    "Fields": "Path,IndexNumber,ParentIndexNumber,SeriesName,ProductionYear,SeriesId"
                 })
                 eps = resp.json().get("Items", [])
 
@@ -313,7 +350,7 @@ def download_missing(
         if item_type == "Movie":
             out_path = movie_dest(it, dest_root, ext)
         else:
-            out_path = episode_dest(it, dest_root, ext)
+            out_path = episode_dest(it, dest_root, ext, client)
 
         if out_path.exists():
             msg = f"Exists: {out_path}"
