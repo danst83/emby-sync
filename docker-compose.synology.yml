@@ -1,0 +1,24 @@
+services:
+  emby-sync:
+    image: emby-sync:latest
+    container_name: emby-sync
+
+    # Environment: 
+    environment:
+      CONFIG_PATH: /app/config/emby-sync.yml   
+
+    # Mount NAS folders into the container
+    volumes:
+      # Downloads saved here
+      - /volume2/emby-sync/:/downloads
+      # Lock files and logs
+      - /volume1/docker/emby-sync/state:/app/state
+      # YAML config folder mounted read-only
+      - /volume1/docker/emby-sync/config:/app/config:ro
+
+    # One-shot job, so no restart loop
+    restart: "no"
+
+    # Not strictly required, but avoids leftover containers
+    tty: false
+    stdin_open: false

@@ -1,0 +1,27 @@
+# Python & build
+__pycache__/
+*.pyc
+
+# Local envs
+.env
+.venv/
+
+# Host runtime volumes (DO NOT COMMIT)
+download/
+state/
+
+# Secrets (never commit)
+secrets/
+*.key
+*.token
+*.crt
+*.pem
+
+# Docker artifacts
+app/.pytest_cache/
+app/.mypy_cache/
+app/.DS_Store
+
+/downloads
+/images
+/config
