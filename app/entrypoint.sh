@@ -22,7 +22,7 @@ trap 'log "SIGTERM"; exit 143' TERM
 # Stale lock detection
 if [[ -e "$LOCKFILE" ]]; then
   OLD_PID=$(cat "$LOCKFILE" 2>/dev/null || echo "")
-  if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
+  if [[ -n "$OLD_PID" ]] && [[ "$OLD_PID" != "$$" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
     log "Lock exists; another run active (PID $OLD_PID). Exiting."
     # Don't remove an active lock on exit
     trap - EXIT
