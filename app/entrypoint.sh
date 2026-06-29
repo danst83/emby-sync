@@ -10,29 +10,15 @@ mkdir -p "$(dirname "$LOCKFILE")" "$(dirname "$LOGFILE")"
 ts() { date "+%F %T"; }
 log() { echo "$(ts) - $*" | tee -a "$LOGFILE"; }
 
-cleanup() {
-  rm -f "$LOCKFILE" 2>/dev/null || true
-}
+# Try to acquire an exclusive lock (non-blocking)
+exec 9>"$LOCKFILE"
+if ! flock -n 9; then
+  log "Another instance is running. Exiting."
+  exit 0
+fi
 
-# Always clean up on exit (normal, error, or signal)
-trap cleanup EXIT
 trap 'log "SIGINT";  exit 130' INT
 trap 'log "SIGTERM"; exit 143' TERM
-
-# Stale lock detection
-if [[ -e "$LOCKFILE" ]]; then
-  OLD_PID=$(cat "$LOCKFILE" 2>/dev/null || echo "")
-  if [[ -n "$OLD_PID" ]] && [[ "$OLD_PID" != "$$" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
-    log "Lock exists; another run active (PID $OLD_PID). Exiting."
-    # Don't remove an active lock on exit
-    trap - EXIT
-    exit 0
-  else
-    log "Stale lock found (PID ${OLD_PID:-unknown} not running). Removing."
-    rm -f "$LOCKFILE"
-  fi
-fi
-echo $$ > "$LOCKFILE"
 
 log "Using config: $CONFIG_PATH"
 if [[ ! -f "$CONFIG_PATH" ]]; then
