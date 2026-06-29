@@ -3,7 +3,7 @@
 
 ## Emby Sync — Setup and Usage
 
-This project builds a Docker image that syncs Emby favorites and can notify via Telegram. Use the Windows commands below (PowerShell) or adapt for Synology.
+A Docker-based tool that syncs your Emby favorites to local storage and sends notifications via Telegram. The instructions below use PowerShell on Windows; adapt paths as needed for Synology.
 
 ### 1) Build the Docker image (Windows)
 
@@ -11,7 +11,7 @@ This project builds a Docker image that syncs Emby favorites and can notify via 
 docker build -t emby-sync:latest -f app/Dockerfile app
 ```
 
-Optionally export the image to a tar file (useful for Synology import):
+Optionally, export the image as a tar file for transfer to a Synology NAS:
 
 ```powershell
 docker save -o images/emby-sync.tar emby-sync:latest
@@ -19,21 +19,21 @@ docker save -o images/emby-sync.tar emby-sync:latest
 
 ### 2) Run with Docker Compose (Windows)
 
-Use the Windows compose file in this repo:
+Start the container in the background:
 
 ```powershell
 docker compose -f .\docker-compose.windows.yml up -d
 ```
 
-To test/run the container once:
+Or run it once for testing (container is removed after exit):
 
 ```powershell
 docker compose -f .\docker-compose.windows.yml run --rm emby-sync
 ```
 
-### 3) Test Python locally (without Docker)
+### 3) Run locally without Docker
 
-From the `app` folder:
+Run the sync script directly from the `app` folder:
 
 ```powershell
 python .\emby_favorites_sync.py --config ..\config\emby-sync.yml
@@ -41,8 +41,8 @@ python .\emby_favorites_sync.py --config ..\config\emby-sync.yml
 
 ### 4) Telegram setup
 
-- Create a bot via Telegram: message `@BotFather`, send `/newbot`, and obtain the API token.
-- Get your chat ID using PowerShell:
+1. Create a bot: message `@BotFather` on Telegram, send `/newbot`, and copy the API token.
+2. Retrieve your chat ID with PowerShell:
 
 ```powershell
 $token = "YOUR_TOKEN"
@@ -52,7 +52,7 @@ $u.result | ForEach-Object { $_.message.chat.id }
 
 ### 5) Configuration file
 
-Create `config/emby-sync.yml` with your details:
+Create `config/emby-sync.yml` with your Emby server and Telegram credentials:
 
 ```yaml
 telegram:
@@ -73,24 +73,46 @@ sync:
 
 ### 6) Synology: import and schedule
 
-1. Import the Docker image tar:
-   - Build and `docker save` the image on Windows (see step 1).
-   - Upload `images/emby-sync.tar` into Synology Container Manager and import.
+#### Method 1 — Compose project
 
-2. Use a Compose project:
-   - In Container Manager, create a project and upload your compose file (e.g., `docker-compose.synology.yml`).
+1. **Import the Docker image:**
+   - Build and export with `docker save` on Windows (see step 1).
+   - In Synology Container Manager, go to Action → Import → Add From File → From This DSM and select `emby-sync.tar`.
 
-Schedule periodic runs via Task Scheduler:
+2. **Create a Compose project:**
+   - In Container Manager, create a new project and upload `docker-compose.synology.yml`.
 
-- Task Scheduler → Create → Scheduled Task → User-defined script
-- User: `root`
-- Schedule: Every 5 minutes
-- Script:
+3. **Schedule periodic runs** via Task Scheduler:
+   - Task Scheduler → Create → Scheduled Task → User-defined script
+   - User: `root`
+   - Schedule: e.g., every 5 minutes
+   - Script:
 
 ```bash
 docker start --attach emby-sync
 ```
 
-Note: Adjust container name and volume mappings to match your environment.
+#### Method 2 — Standalone container
+
+Import the image as in Method 1, but skip creating a Compose project. Instead, schedule the container to run directly.
+
+Schedule periodic runs via Task Scheduler:
+
+- Task Scheduler → Create → Scheduled Task → User-defined script
+- User: `root`
+- Script:
+
+```bash
+docker run --rm \
+  --name emby-sync \
+  -e CONFIG_PATH=/app/config/emby-sync.yml \
+  -e TZ=America/New_York \
+  -v /volume2/emby-sync/:/app/downloads \
+  -v /volume1/docker/emby-sync/state:/app/state \
+  -v /volume1/docker/emby-sync/config:/app/config:ro \
+  emby-sync:latest
+```
+
+> **Note:** Adjust volume mappings and timezone to match your environment.
 
 
